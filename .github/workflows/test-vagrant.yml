@@ -1,0 +1,102 @@
+name: Test Vagrant Kubernetes Setup
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-syntax:
+    runs-on: ubuntu-latest
+    name: Validate Vagrantfile Syntax
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1'
+    
+    - name: Install Vagrant
+      run: |
+        wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+        sudo apt update && sudo apt install vagrant
+    
+    - name: Validate Ubuntu 24.04 Vagrantfile
+      run: |
+        cd Ubuntu2404
+        vagrant validate
+    
+    - name: Validate Ubuntu 22.04 Vagrantfile
+      run: |
+        cd Ubuntu2204
+        vagrant validate
+    
+    - name: Run Configuration Tests
+      run: |
+        ruby test-config.rb
+
+  test-documentation:
+    runs-on: ubuntu-latest
+    name: Test Documentation
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js for markdownlint
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install markdownlint
+      run: npm install -g markdownlint-cli
+    
+    - name: Lint README files
+      run: |
+        markdownlint README.md
+        markdownlint Ubuntu2404/README.md
+        markdownlint Ubuntu2204/README.md
+
+  # Note: Full VM testing would require nested virtualization
+  # which is not available in GitHub Actions standard runners
+  test-configuration-matrix:
+    runs-on: ubuntu-latest
+    name: Test Configuration Matrix
+    strategy:
+      matrix:
+        ubuntu_version: [Ubuntu2404, Ubuntu2204]
+        use_custom_box: [true, false]
+        vm_memory: [2048, 4096]
+        worker_count: [1, 2, 3]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Ruby
+      uses: ruby/setup-ruby@v1
+      with:
+        ruby-version: '3.1'
+    
+    - name: Install Vagrant
+      run: |
+        wget -O- https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+        sudo apt update && sudo apt install vagrant
+    
+    - name: Test Configuration
+      env:
+        USE_CUSTOM_BOX: ${{ matrix.use_custom_box }}
+        VM_MEMORY: ${{ matrix.vm_memory }}
+        WORKER_COUNT: ${{ matrix.worker_count }}
+      run: |
+        cd ${{ matrix.ubuntu_version }}
+        # Only validate syntax since we can't run VMs in CI
+        vagrant validate
+        echo "Configuration test passed for:"
+        echo "  Ubuntu Version: ${{ matrix.ubuntu_version }}"
+        echo "  Custom Box: ${{ matrix.use_custom_box }}"
+        echo "  Memory: ${{ matrix.vm_memory }}MB"
+        echo "  Workers: ${{ matrix.worker_count }}"

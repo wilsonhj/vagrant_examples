@@ -1,38 +1,56 @@
+# Configuration variables - can be overridden via environment variables
+BRIDGE_INTERFACE = ENV['BRIDGE_INTERFACE'] || nil  # nil = interactive selection
+VM_MEMORY = ENV['VM_MEMORY'] || 4096
+VM_CPUS = ENV['VM_CPUS'] || 4
+WORKER_COUNT = ENV['WORKER_COUNT'] || 2
+NETWORK_BASE = ENV['NETWORK_BASE'] || "10.0.0"
+
+# Box configuration with fallback options
+# Set USE_CUSTOM_BOX=false to use public Ubuntu box instead
+USE_CUSTOM_BOX = ENV['USE_CUSTOM_BOX'] != 'false'
+CUSTOM_BOX = "m_boxes/ubuntu_2404_server"
+CUSTOM_BOX_VERSION = "0.3.0"
+FALLBACK_BOX = "ubuntu/noble64"  # Ubuntu 24.04 LTS public box
+
 Vagrant.configure("2") do |config|
   config.vm.provider :virtualbox do |v|
-    v.memory = 4096
-    # v.memory = 8192
-    v.cpus = 4
+    v.memory = VM_MEMORY
+    v.cpus = VM_CPUS
   end
 
   config.vm.provision :shell, privileged: true, inline: $install_common_tools
 
   config.vm.define :master do |master|
-    master.vm.box = "m_boxes/ubuntu_2404_server"
-    master.vm.box_version = "0.3.0"
+    if USE_CUSTOM_BOX
+      master.vm.box = CUSTOM_BOX
+      master.vm.box_version = CUSTOM_BOX_VERSION
+    else
+      master.vm.box = FALLBACK_BOX
+    end
     master.vm.hostname = "master"
-    master.vm.network "public_network", bridge: "eno1"
-    master.vm.network "private_network", ip: "10.0.0.10"
+    master.vm.network "public_network", bridge: BRIDGE_INTERFACE
+    master.vm.network "private_network", ip: "#{NETWORK_BASE}.10"
     master.vm.network "forwarded_port", guest: 8080, host: 8080
     # to allow the ip address from above it needs to be added. Check here for details: https://www.virtualbox.org/manual/ch06.html#network_hostonly
     master.vm.provision :shell, privileged: false, inline: $provision_master_node
   end
 
-  %w{worker1 worker2}.each_with_index do |name, i|
-    config.vm.define name do |worker|
-      worker.vm.box = "m_boxes/ubuntu_2404_server"
-      worker.vm.box_version = "0.3.0"
-      worker.vm.hostname = name
-      worker.vm.network "private_network", ip: "10.0.0.#{i + 11}"
+  (1..WORKER_COUNT).each do |i|
+    config.vm.define "worker#{i}" do |worker|
+      if USE_CUSTOM_BOX
+        worker.vm.box = CUSTOM_BOX
+        worker.vm.box_version = CUSTOM_BOX_VERSION
+      else
+        worker.vm.box = FALLBACK_BOX
+      end
+      worker.vm.hostname = "worker#{i}"
+      worker.vm.network "private_network", ip: "#{NETWORK_BASE}.#{i + 10}"
       worker.vm.provision "shell", privileged: false, inline: <<-SHELL
 sudo /vagrant/join.sh
-# echo "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.#{i + 11}" | sudo tee /etc/sysconfig/kubelet
-# sudo mkdir /etc/systemd/system/kubelet.service.d
-# sudo touch /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-# echo 'Environment="KUBELET_EXTRA_ARGS=--node-ip=10.0.0.#{i + 11}"' | sudo tee -a /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-sudo rm /etc/default/kubelet
+# Configure kubelet to use the correct node IP
+sudo rm -f /etc/default/kubelet
 sudo touch /etc/default/kubelet
-echo "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.#{i + 11}" | sudo tee -a /etc/default/kubelet
+echo "KUBELET_EXTRA_ARGS=--node-ip=#{NETWORK_BASE}.#{i + 10}" | sudo tee -a /etc/default/kubelet
 
 
 sudo systemctl daemon-reload
@@ -70,7 +88,7 @@ sudo sysctl --system
 sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
 
 # Adding Docker's official GPG key
-sudo apt-get install ca-certificates curl
+sudo apt-get install -y ca-certificates curl
 sudo install -m 0755 -d /etc/apt/keyrings
 sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -85,10 +103,9 @@ sudo apt-get update
 # Install Docker
 sudo apt-get install -y docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin
 
-# Run Docker rootless
-sudo groupadd docker
-sudo usermod -aG docker $USER
-newgrp docker
+# Add vagrant user to docker group for rootless Docker
+sudo groupadd docker || true  # Don't fail if group already exists
+sudo usermod -aG docker vagrant
 
 # Install containerd
 sudo apt update
@@ -104,9 +121,9 @@ sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/c
 sudo systemctl restart containerd
 sudo systemctl enable containerd
 
-# Install the Kubernetes Repos
+# Install the Kubernetes Repos (using v1.30 for stability)
 curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.32/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.30/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
 
 sudo apt update
 
@@ -121,7 +138,7 @@ OUTPUT_FILE=/vagrant/join.sh
 rm -rf $OUTPUT_FILE
 
 # Start cluster
-sudo kubeadm init --apiserver-advertise-address=10.0.0.10 --pod-network-cidr=192.168.0.0/16 | grep -E -- "kubeadm join|--discovery-token-ca-cert-hash" > ${OUTPUT_FILE}
+sudo kubeadm init --apiserver-advertise-address=#{NETWORK_BASE}.10 --pod-network-cidr=192.168.0.0/16 | grep -E -- "kubeadm join|--discovery-token-ca-cert-hash" > ${OUTPUT_FILE}
 chmod +x $OUTPUT_FILE
 
 # Configure kubectl
@@ -129,13 +146,10 @@ mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-# Fix kubelet IP
-# sudo mkdir /etc/systemd/system/kubelet.service.d
-# sudo touch /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-# echo 'Environment="KUBELET_EXTRA_ARGS=--node-ip=10.0.0.10"' | sudo tee -a /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
-sudo rm /etc/default/kubelet
+# Configure kubelet to use the correct node IP
+sudo rm -f /etc/default/kubelet
 sudo touch /etc/default/kubelet
-echo "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.10" | sudo tee -a /etc/default/kubelet
+echo "KUBELET_EXTRA_ARGS=--node-ip=#{NETWORK_BASE}.10" | sudo tee -a /etc/default/kubelet
 
 # Restart the daemon
 sudo systemctl daemon-reload

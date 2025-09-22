@@ -1,34 +1,55 @@
+# Configuration variables - can be overridden via environment variables
+BRIDGE_INTERFACE = ENV['BRIDGE_INTERFACE'] || nil  # nil = interactive selection
+VM_MEMORY = ENV['VM_MEMORY'] || 8192
+VM_CPUS = ENV['VM_CPUS'] || 4
+WORKER_COUNT = ENV['WORKER_COUNT'] || 2
+NETWORK_BASE = ENV['NETWORK_BASE'] || "10.0.0"
+
+# Box configuration with fallback options
+# Set USE_CUSTOM_BOX=false to use public Ubuntu box instead
+USE_CUSTOM_BOX = ENV['USE_CUSTOM_BOX'] != 'false'
+CUSTOM_BOX = "c_boxes/ubuntu2204-base"
+CUSTOM_BOX_VERSION = "0.4.0"
+FALLBACK_BOX = "ubuntu/jammy64"  # Ubuntu 22.04 LTS public box
+
 Vagrant.configure("2") do |config|
   config.vm.provider :virtualbox do |v|
-    #    v.memory = 1024
-    # v.memory = 2048
-    # v.memory = 4096
-    v.memory = 8192
-    v.cpus = 4
+    v.memory = VM_MEMORY
+    v.cpus = VM_CPUS
   end
 
   config.vm.provision :shell, privileged: true, inline: $install_common_tools
 
   config.vm.define :master do |master|
-    master.vm.box = "c_boxes/ubuntu2204-base"
-    master.vm.box_version = "0.4.0"
+    if USE_CUSTOM_BOX
+      master.vm.box = CUSTOM_BOX
+      master.vm.box_version = CUSTOM_BOX_VERSION
+    else
+      master.vm.box = FALLBACK_BOX
+    end
     master.vm.hostname = "master"
-    master.vm.network "public_network", bridge: "eno1"
-    master.vm.network "private_network", ip: "10.0.0.10"
+    master.vm.network "public_network", bridge: BRIDGE_INTERFACE
+    master.vm.network "private_network", ip: "#{NETWORK_BASE}.10"
     # to allow the ip address from above it needs to be added. Check here for details: https://www.virtualbox.org/manual/ch06.html#network_hostonly
     master.vm.provision :shell, privileged: false, inline: $provision_master_node
   end
 
-  %w{worker1 worker2}.each_with_index do |name, i|
-    config.vm.define name do |worker|
-      worker.vm.box = "c_boxes/ubuntu2204-base"
-      worker.vm.box_version = "0.4.0"
-      worker.vm.hostname = name
-      worker.vm.network "private_network", ip: "10.0.0.#{i + 11}"
+  (1..WORKER_COUNT).each do |i|
+    config.vm.define "worker#{i}" do |worker|
+      if USE_CUSTOM_BOX
+        worker.vm.box = CUSTOM_BOX
+        worker.vm.box_version = CUSTOM_BOX_VERSION
+      else
+        worker.vm.box = FALLBACK_BOX
+      end
+      worker.vm.hostname = "worker#{i}"
+      worker.vm.network "private_network", ip: "#{NETWORK_BASE}.#{i + 10}"
       worker.vm.provision "shell", privileged: false, inline: <<-SHELL
 sudo /vagrant/join.sh
-# echo "KUBELET_EXTRA_ARGS=--node-ip=10.0.0.#{i + 11}" | sudo tee /etc/sysconfig/kubelet
-echo 'Environment="KUBELET_EXTRA_ARGS=--node-ip=10.0.0.#{i + 11}"' | sudo tee -a /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+# Configure kubelet to use the correct node IP
+sudo rm -f /etc/default/kubelet
+sudo touch /etc/default/kubelet
+echo "KUBELET_EXTRA_ARGS=--node-ip=#{NETWORK_BASE}.#{i + 10}" | sudo tee -a /etc/default/kubelet
 
 sudo systemctl daemon-reload
 sudo systemctl restart kubelet
@@ -103,9 +124,8 @@ sudo apt update
 # Installing docker 
 sudo apt install -y docker-ce=5:23.0.1-1~ubuntu.22.04~jammy
 
-# Putting the user in the docker group so sudo isn't needed
-sudo usermod -aG docker ${USER}
-newgrp docker
+# Add vagrant user to docker group for rootless Docker
+sudo usermod -aG docker vagrant
 
 SCRIPT
 
@@ -114,7 +134,7 @@ OUTPUT_FILE=/vagrant/join.sh
 rm -rf $OUTPUT_FILE
 
 # Start cluster
-sudo kubeadm init --apiserver-advertise-address=10.0.0.10 --pod-network-cidr=192.168.0.0/16 | grep -E -- "kubeadm join|--discovery-token-ca-cert-hash" > ${OUTPUT_FILE}
+sudo kubeadm init --apiserver-advertise-address=#{NETWORK_BASE}.10 --pod-network-cidr=192.168.0.0/16 | grep -E -- "kubeadm join|--discovery-token-ca-cert-hash" > ${OUTPUT_FILE}
 chmod +x $OUTPUT_FILE
 
 # Configure kubectl
@@ -122,8 +142,10 @@ mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-# Fix kubelet IP
-echo 'Environment="KUBELET_EXTRA_ARGS=--node-ip=10.0.0.10"' | sudo tee -a /etc/systemd/system/kubelet.service.d/10-kubeadm.conf
+# Configure kubelet to use the correct node IP
+sudo rm -f /etc/default/kubelet
+sudo touch /etc/default/kubelet
+echo "KUBELET_EXTRA_ARGS=--node-ip=#{NETWORK_BASE}.10" | sudo tee -a /etc/default/kubelet
 
 # Restart the daemon
 sudo systemctl daemon-reload
